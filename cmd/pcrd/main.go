@@ -20,7 +20,7 @@ func main() {
 	case "unpack":
 		unpack(need(2))
 	case "pack":
-		pack(need(3))
+		pack(need(2))
 	case "verify":
 		verify(need(1))
 	default:
@@ -32,7 +32,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `pcrd - PCRD (XIP ext2 rootfs) container tool
 
   pcrd unpack <rootfs> <ext2.img>
-  pcrd pack   <ext2.img> <rootfs-in> <rootfs-out>
+  pcrd pack   <ext2.img> <rootfs-out>
   pcrd verify <rootfs>
 `)
 	os.Exit(2)
@@ -57,17 +57,15 @@ func unpack(a []string) {
 	die(err)
 	bad, _ := pcrd.Verify(rd(a[0]))
 	die(os.WriteFile(a[1], c.Ext2, 0o644))
-	fmt.Printf("ext2: %d bytes (%d pages); header word8=0x%08x; %d bad page CRCs\n",
-		len(c.Ext2), c.NumPages, c.Word8, len(bad))
+	fmt.Printf("ext2: %d bytes (%d pages); table-crc=0x%08x; %d bad page CRCs\n",
+		len(c.Ext2), c.NumPages, c.TableCRC, len(bad))
 }
 
 func pack(a []string) {
-	orig, err := pcrd.Decode(rd(a[1]))
+	out, err := pcrd.Encode(rd(a[0])) // whole PCRD header is computed from the ext2
 	die(err)
-	out, err := pcrd.Encode(rd(a[0]), orig.Word8)
-	die(err)
-	die(os.WriteFile(a[2], out, 0o644))
-	fmt.Printf("wrote %s (%d bytes) with recomputed page-CRC table\n", a[2], len(out))
+	die(os.WriteFile(a[1], out, 0o644))
+	fmt.Printf("wrote %s (%d bytes); full PCRD header recomputed from ext2\n", a[1], len(out))
 }
 
 func verify(a []string) {

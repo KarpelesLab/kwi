@@ -4,7 +4,7 @@
 //
 //	offset 0x0  "PCRD"                     magic
 //	offset 0x4  u32 le  num_pages          (e.g. 65280 = 255 MiB / 4096)
-//	offset 0x8  u32                        unchecked (left as-is)
+//	offset 0x8  u32 le  table_crc          crc32_le(0xFFFFFFFF, csum[]) over the table below
 //	offset 0xc  u32 le  csum[num_pages]    per 4 KiB page:
 //	                    crc32_le(0xFFFFFFFF, page)   (poly 0xEDB88320, NO final XOR)
 //	            0xff padding to header size
@@ -28,16 +28,16 @@ const (
 	tableOff   = 0xc
 )
 
-// pageCRC returns crc32_le(0xFFFFFFFF, page) with no final inversion, matching
-// the value pcrd_validate_page compares against. Go's ChecksumIEEE is the
-// standard CRC-32 (init 0xFFFFFFFF, final XOR); undoing the final XOR gives the
-// driver's value.
-func pageCRC(page []byte) uint32 { return crc32.ChecksumIEEE(page) ^ 0xFFFFFFFF }
+// crc32le returns crc32_le(0xFFFFFFFF, b) with no final inversion — the value
+// the pcrd driver computes. Go's ChecksumIEEE is the standard CRC-32 (init
+// 0xFFFFFFFF, final XOR); undoing the final XOR gives the driver's value. Used
+// both for each 4 KiB page and for the whole CRC table (header word at 0x8).
+func crc32le(b []byte) uint32 { return crc32.ChecksumIEEE(b) ^ 0xFFFFFFFF }
 
 // Container is a parsed PCRD blob.
 type Container struct {
 	NumPages uint32
-	Word8    uint32 // header[0x8], unchecked by the driver; preserved on Encode
+	TableCRC uint32 // header[0x8] = crc32_le over the per-page CRC table
 	Ext2     []byte // the ext2 filesystem
 }
 
@@ -53,7 +53,7 @@ func Decode(b []byte) (*Container, error) {
 	}
 	return &Container{
 		NumPages: n,
-		Word8:    binary.LittleEndian.Uint32(b[8:]),
+		TableCRC: binary.LittleEndian.Uint32(b[8:]),
 		Ext2:     b[HeaderSize : HeaderSize+int(n)*PageSize],
 	}, nil
 }
@@ -68,17 +68,17 @@ func Verify(b []byte) ([]int, error) {
 	var bad []int
 	for i := 0; i < int(c.NumPages); i++ {
 		stored := binary.LittleEndian.Uint32(b[tableOff+i*4:])
-		if stored != pageCRC(c.Ext2[i*PageSize:(i+1)*PageSize]) {
+		if stored != crc32le(c.Ext2[i*PageSize:(i+1)*PageSize]) {
 			bad = append(bad, i)
 		}
 	}
 	return bad, nil
 }
 
-// Encode builds a PCRD container around ext2, recomputing the page-CRC table.
-// ext2 must be a whole number of 4 KiB pages. word8 is written to header[0x8]
-// (pass the value from a Decode of the original; it is not validated by pcrd).
-func Encode(ext2 []byte, word8 uint32) ([]byte, error) {
+// Encode builds a complete PCRD container around ext2, computing the per-page
+// CRC table and the table CRC (header word at 0x8) from scratch. ext2 must be a
+// whole number of 4 KiB pages. No fields from an original container are needed.
+func Encode(ext2 []byte) ([]byte, error) {
 	if len(ext2)%PageSize != 0 {
 		return nil, fmt.Errorf("pcrd: ext2 size %d is not a multiple of %d", len(ext2), PageSize)
 	}
@@ -93,10 +93,11 @@ func Encode(ext2 []byte, word8 uint32) ([]byte, error) {
 	}
 	copy(out, Magic)
 	binary.LittleEndian.PutUint32(out[4:], uint32(n))
-	binary.LittleEndian.PutUint32(out[8:], word8)
 	for i := 0; i < n; i++ {
-		binary.LittleEndian.PutUint32(out[tableOff+i*4:], pageCRC(ext2[i*PageSize:(i+1)*PageSize]))
+		binary.LittleEndian.PutUint32(out[tableOff+i*4:], crc32le(ext2[i*PageSize:(i+1)*PageSize]))
 	}
+	// header[0x8] = crc32_le over the just-written per-page CRC table
+	binary.LittleEndian.PutUint32(out[8:], crc32le(out[tableOff:tableOff+n*4]))
 	copy(out[HeaderSize:], ext2)
 	return out, nil
 }

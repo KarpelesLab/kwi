@@ -63,7 +63,7 @@ against the GPL driver `drivers/block/pcrd.c` — `pcrd_check_header` / `pcrd_va
 ```
 0x0    "PCRD"                  magic
 0x4    u32 le  num_pages       255 MiB / 4096 = 65280
-0x8    u32                     not validated by the driver (preserved on rebuild)
+0x8    u32 le  table_crc       crc32_le(0xFFFFFFFF, csum[]) over the CRC table
 0xc    u32 le  csum[num_pages] per 4 KiB page: crc32_le(0xFFFFFFFF, page)
                                (Linux crc32_le, poly 0xEDB88320, NO final XOR
                                 = zlib.crc32(page) ^ 0xFFFFFFFF)

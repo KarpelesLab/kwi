@@ -45,7 +45,7 @@ kwi extract LOADING.KWI out/                   # write each component to out/
 kwi replace LOADING.KWI rootfs new-rootfs out.KWI   # replace a component, repack
 
 pcrd unpack out/rootfs ext2.img                # rootfs (PCRD) -> raw ext2
-pcrd pack   ext2.img out/rootfs rootfs.new     # ext2 -> rootfs, recomputing page CRCs
+pcrd pack   ext2.img rootfs.new               # ext2 -> rootfs, full header recomputed
 pcrd verify out/rootfs                         # check the per-page CRC table
 ```
 
@@ -55,7 +55,7 @@ Full modify-the-rootfs workflow:
 kwi extract LOADING.KWI out/
 pcrd unpack out/rootfs ext2.img
 # edit ext2.img in place (loop-mount ro/rw or debugfs); keep it the same size
-pcrd pack ext2.img out/rootfs rootfs.new
+pcrd pack ext2.img rootfs.new
 kwi replace LOADING.KWI rootfs rootfs.new NEW.KWI
 ```
 
