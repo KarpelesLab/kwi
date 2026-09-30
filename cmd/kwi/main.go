@@ -1,11 +1,11 @@
-// Command kwi inspects and rebuilds LOADING.KWI factory-nav program images.
+// Command kwi inspects and rebuilds LOADING.KWI factory-nav program images by
+// parsing their component manifest.
 //
 // Usage:
 //
-//	kwi info    <in.KWI>
-//	kwi unpack  <in.KWI> <outdir>          # writes front.bin, root.img, kernel.bin
-//	kwi pack    <front.bin> <root.img> <kernel.bin> <out.KWI>
-//	kwi setroot <in.KWI> <new-root.img> <out.KWI>   # replace ROOT (must be 255 MiB ext2)
+//	kwi info    <in.KWI>                       # list manifest entries
+//	kwi extract <in.KWI> <outdir>             # write every component to outdir/
+//	kwi replace <in.KWI> <name> <file> <out.KWI>   # replace one component, repack
 package main
 
 import (
@@ -23,12 +23,10 @@ func main() {
 	switch os.Args[1] {
 	case "info":
 		info(args(1))
-	case "unpack":
-		unpack(args(2))
-	case "pack":
-		pack(args(4))
-	case "setroot":
-		setroot(args(3))
+	case "extract":
+		extract(args(2))
+	case "replace":
+		replace(args(4))
 	default:
 		usage()
 	}
@@ -38,9 +36,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `kwi - read/write factory-nav LOADING.KWI program images
 
   kwi info    <in.KWI>
-  kwi unpack  <in.KWI> <outdir>
-  kwi pack    <front.bin> <root.img> <kernel.bin> <out.KWI>
-  kwi setroot <in.KWI> <new-root.img> <out.KWI>
+  kwi extract <in.KWI> <outdir>
+  kwi replace <in.KWI> <name> <file> <out.KWI>
 `)
 	os.Exit(2)
 }
@@ -59,47 +56,49 @@ func die(err error) {
 	}
 }
 
-func read(p string) []byte {
-	b, err := os.ReadFile(p)
-	die(err)
-	return b
-}
+func read(p string) []byte { b, err := os.ReadFile(p); die(err); return b }
 
 func info(a []string) {
 	img, err := kwi.Parse(read(a[0]))
 	die(err)
-	fmt.Printf("tag        %s\n", img.Header.Tag)
-	fmt.Printf("front      0x%08x  %d bytes  (wrapper header + word-swapped NOR image: GraphicDB + loader)\n", 0, len(img.Front))
-	fmt.Printf("root(ext2) 0x%08x  %d bytes  (superblock says %d)\n", img.RootOffset, len(img.Root), img.Ext2Size())
-	fmt.Printf("tail       0x%08x  %d bytes  (SMNG process/task settings, then uncompressed Linux kernel)\n", img.KernelOffset(), len(img.Kernel))
-	fmt.Printf("total                  %d bytes\n", len(img.Front)+len(img.Root)+len(img.Kernel))
+	fmt.Printf("tag          %s\n", img.Header.Tag)
+	fmt.Printf("manifest at  0x%x, data at 0x%x, %d entries\n\n", img.ManifestOff, img.DataOff, len(img.Entries))
+	fmt.Printf("  %-24s %-12s %-12s\n", "name", "abs-offset", "size")
+	for _, e := range img.Entries {
+		fmt.Printf("  %-24s 0x%08x   0x%08x (%d)\n", e.Name, img.DataOff+int(e.Offset), e.Size, e.Size)
+	}
 }
 
-func unpack(a []string) {
+func extract(a []string) {
 	img, err := kwi.Parse(read(a[0]))
 	die(err)
 	dir := a[1]
 	die(os.MkdirAll(dir, 0o755))
-	die(os.WriteFile(filepath.Join(dir, "front.bin"), img.Front, 0o644))
-	die(os.WriteFile(filepath.Join(dir, "root.img"), img.Root, 0o644))
-	die(os.WriteFile(filepath.Join(dir, "kernel.bin"), img.Kernel, 0o644))
-	fmt.Printf("unpacked %s (tag %s) -> %s/{front.bin,root.img,kernel.bin}\n", a[0], img.Header.Tag, dir)
+	for _, e := range img.Entries {
+		d, _ := img.EntryData(e.Name)
+		// sanitize name for the filesystem
+		name := filepath.Base(e.Name)
+		die(os.WriteFile(filepath.Join(dir, name), d, 0o644))
+		fmt.Printf("  %-24s -> %s (%d bytes)\n", e.Name, name, len(d))
+	}
 }
 
-func pack(a []string) {
-	img := &kwi.Image{Front: read(a[0]), Root: read(a[1]), Kernel: read(a[2])}
-	out, err := img.Pack()
-	die(err)
-	die(os.WriteFile(a[3], out, 0o644))
-	fmt.Printf("wrote %s (%d bytes)\n", a[3], len(out))
-}
-
-func setroot(a []string) {
+func replace(a []string) {
 	img, err := kwi.Parse(read(a[0]))
 	die(err)
-	die(img.SetRoot(read(a[1])))
-	out, err := img.Pack()
+	name, file, out := a[1], a[2], a[3]
+	found := false
+	for _, e := range img.Entries {
+		if e.Name == name {
+			found = true
+		}
+	}
+	if !found {
+		die(fmt.Errorf("no such component %q", name))
+	}
+	nd := read(file)
+	packed, err := img.Pack(map[string][]byte{name: nd})
 	die(err)
-	die(os.WriteFile(a[2], out, 0o644))
-	fmt.Printf("wrote %s with replaced ROOT (%d bytes)\n", a[2], len(out))
+	die(os.WriteFile(out, packed, 0o644))
+	fmt.Printf("replaced %q with %s (%d bytes), wrote %s (%d bytes)\n", name, file, len(nd), out, len(packed))
 }

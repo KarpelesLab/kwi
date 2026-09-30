@@ -5,92 +5,85 @@ navigation head units built on the Renesas R-Car H1 (`R8A77791`) platform — e.
 Toyota `86100-5818x` / model `CQ-UT24J0AJ` (30-series Alphard/Vellfire, JBL), and
 the shared Land Cruiser / Lexus modules (`86421-60V…`). It is the unit of the
 **software-update ("reprogram" / リプロ) flow**: a resident updater copies a KWI's
-payload into internal storage, showing baked-in bitmap screens
+components into internal flash, showing baked-in bitmap screens
 ("新しいソフトウェアをコピー中です") while it runs.
 
 This documents the **program/OS container**. For the *map* data format on these units
 see the separate, maps-focused project https://github.com/jharg/kiwiread .
 
 Reverse-engineered from JDM 2015 and 2021 map SD images; verified across 12 KWI
-variants (`HC02 HC11 HC59 HC60 HD70 HD72 HE38 HF06 HF93 HH40 HJ66` + a `BKPRG` copy)
-and both a 2015 and 2021 build. `<TAG>` below is the `EXE/<TAG>/` directory name.
+variants. `<TAG>` = the `EXE/<TAG>/` directory name (e.g. `HC59`).
 
-## Overall layout
-
-Four logical parts. Only the ROOT boundary is self-describing (via the ext2
-superblock); the others are derived from it and from fixed alignment.
+## Overall structure
 
 ```
-offset (HC59 example)         section
--------------------------     -------------------------------------------------------------
-0x000000 .. 0x001000          WRAPPER HEADER  (4 KiB, NOT byte-swapped)
-0x001000 .. ~0x157c0e         NOR FLASH IMAGE (partial dump of the 8 MiB x16 boot NOR)
-        ~0x157c0e .. 0x158002 0xff erased-flash padding to the ROOT boundary
-0x158002 .. 0x10058002        ROOT   = ext2 filesystem, 255 MiB (0xFF00000)   [NOT swapped]
-0x10058002 .. (kernel start)  SETTINGS = "SMNG" process/task table (tab-separated text)
-(kernel start) .. EOF         KERNEL  = raw *uncompressed* Linux 2.6.35 image
+0x000000  Wrapper header (0x20 bytes, not byte-swapped): tags HC59/VC59/10KA + constants
+0x001000  NOR flash image (16-bit word-swapped): block table + GraphicDB V0564 archives
+          + plain reprogram BMPs, 0xff-padded  (a partial dump of the 8 MiB x16 boot NOR)
+0x04c000  "Program Block" records (0x400 each, repeated): module tag / date / "AISIN DEVELOP"
+0x04e02e  MANIFEST  (component table)  <-- the authoritative layout
+0x04e0a6  DATA      (components concatenated in manifest order)
 ```
 
-Sizes: WRAPPER+FLASH (the "front") is ~1.35 MiB and constant; ROOT is a fixed 255 MiB;
-the tail (SETTINGS+KERNEL) is the remainder (~4 MiB) and its length is the only thing
-that varies between variants.
+Everything before the DATA section (wrapper header, GraphicDB flash image, Program
+Block records, and the manifest table itself) is the "preamble". The **manifest** is
+the source of truth: component offsets are relative to the DATA start and are
+contiguous (each offset = sum of preceding sizes).
 
-### Wrapper header (0x0 .. 0x20), not byte-swapped
+## Manifest entry
 
-| offset | value (HC59)   | meaning                                              |
-|--------|----------------|------------------------------------------------------|
-| 0x00   | `00 01 00 00`  | format/version marker (constant)                     |
-| 0x04   | `0f 56 a3 00`  | constant across all variants (purpose unconfirmed)   |
-| 0x08   | `3c 3c 8a 00`  | constant across all variants                         |
-| 0x0c   | `07 00 01 66`  | constant                                             |
-| 0x10   | `00 01 00 00`  | constant                                             |
-| 0x14   | `01 00 00 00`  | constant                                             |
-| 0x18   | `HC59`         | module tag = `EXE/<TAG>/` dir name                   |
-| 0x4c   | `VC59`         | build/version code (matches `…/13CY/VC59/…` path)    |
-| 0x50   | `10KA`         | variant/hardware code                                |
+Each entry, starting at the first one (relative offset 0):
 
-The wrapper header does **NOT** encode the section offsets/sizes: none of the real
-offsets (FLASH start, ROOT start/size, kernel offset, file size) appear as a stored
-value anywhere in the front, and fields 0x04–0x14 are byte-identical across all 12
-variants while the actual sizes differ. So a reader must locate ROOT by its ext2
-superblock, not by a header field.
+```
++0x00  u32 be   relative offset (from DATA start; entry[0]=0, contiguous)
++0x04  u32 be   size in bytes
++0x08  u16 be   name length N
++0x0a  N bytes  name (ASCII)
+       (padded with one 0x00 if N is odd, to keep entries 2-byte aligned)
+```
 
-### NOR flash image (0x1000 .. ~0x157c0e), 16-bit word-swapped
+The DATA section begins immediately after the last entry's name (+pad).
 
-A partial raw dump of the head unit's **8 MiB, x16 NOR** (Spansion S29JL064J), stored
-**byte-swapped within each 16-bit word** (a `x16` flash-dump artifact): the string
-`GraphicDB  V0564` reads as `rGpaihDc  BV5064` until you swap each 16-bit word. It holds:
-- **`0x1000`**: a block/index table (sequential 16-bit entries with `ff` markers).
-- **`0x1800`, `0x27000`**: `GraphicDB V0564` archives (build `2006-07-25`) — a legacy
-  Denso/Aisin-lineage graphic asset format, stored in its native word-swapped order,
-  with what looks like an RGB555 palette (runs of `0x7fff`) after each header.
-- The reprogram/boot **BMP screens** (e.g. `0x4e0a6`, `0xb2dca`) — these are stored
-  **plain (not swapped)**, so the front is mixed-endian by sub-region.
-- Trailing `0xff` (erased flash) padding up to the ROOT boundary.
+## Components (HC59 example)
 
-`GraphicDB V0564` is not documented publicly (as of 2026); its index/entry format is
-still being reverse-engineered here.
+| name | abs offset | size | magic | what it is |
+|---|---|---|---|---|
+| `grp_dat_13cy_prgup.bmp` | 0x04e0a6 | 0x64d24 | `BM` | 832×496 "copying new software" reprogram screen |
+| `loading.bmp` | 0x0b2dca | 0x65038 | `BM` | 832×496 "program loading" screen |
+| `pmb` | 0x117e02 | 0x200 | `27 05 19 56` | **U-Boot uImage** wrapping the kernel command line |
+| `rootfs` | 0x118002 | 0x0ff40000 | `PCRD` | **pcrd container**: 0x40000 header + a 255 MiB ext2 nested inside |
+| `USRCONF` | 0x10058002 | 0xcbb0 | `SMNG_PRO` | process/task settings (tab-separated text) |
+| `xipImage` | 0x10064bb2 | 0x417914 | (ARM) | uncompressed (execute-in-place) Linux 2.6.35 kernel |
 
-### ROOT (ext2, 255 MiB)
+### `rootfs` = PCRD (nested ext2)
 
-Standard ext2, block size 4096, 65,280 blocks = exactly `0xFF00000`. Not swapped. This
-is the Linux root filesystem (`/vns/...`, the HMI, etc.).
+The `rootfs` component is not a raw ext2 — it starts with the ASCII magic `PCRD` and a
+0x40000 (256 KiB) header, then the ext2 filesystem (block size 4096; 255 MiB =
+`0xFF00000`; `0x40000 + 0xFF00000 = 0x0FF40000` = the `rootfs` entry size). It is
+mounted **execute-in-place** by the `pcrd` block driver. From `pmb`'s kernel cmdline:
 
-### SETTINGS + KERNEL (tail)
+```
+console=ttyS0,115200 root=/dev/pcrd rootflags=xip lpj=963379 mem=674M quiet pcrd=0x68000000,xip ro max_loop=21
+```
 
-Immediately after ROOT is a **text** process/task manifest beginning `SMNG_PROCESSNAME`
-(tab-separated: task name, scheduling class, priority, stack size, …). The
-**uncompressed** ARM Linux kernel follows it; its `Linux version 2.6.35.14+ … MontaVista …`
-banner is in plaintext. (The exact SETTINGS→KERNEL boundary is not yet pinned; treat the
-whole tail as one blob when repacking.)
+- `console=ttyS0,115200` — the debug serial console (SCIF), 115200 baud.
+- `root=/dev/pcrd rootflags=xip`, `pcrd=0x68000000,xip` — rootfs mounted XIP from
+  physical `0x68000000` via the pcrd driver (hence uncompressed & page-aligned).
+- `xipImage` is likewise an XIP kernel.
 
 ## Rebuilding a modified image
 
-- Keep ROOT **exactly the same size** (255 MiB). Modify the ext2 in place (loop-mount or
-  `debugfs`/`e2tools`); do not grow/shrink it. Then `front || modified_root || tail`
-  reproduces a valid byte layout (`kwi pack` / `kwi setroot`; unpack→pack is byte-identical).
-- FRONT and TAIL are passed through unchanged for a rootfs-only modification.
-- **OPEN QUESTION (verify before flashing homebrew):** whether the *resident* updater (in
-  the unit's NOR / internal flash, not in the KWI) validates the package (CRC/hash/signature)
-  before writing. Nothing in the KWI itself is a whole-image checksum, and the footer is zero
-  padding — but the resident updater has not been dumped. **Test on a donor unit, never the car.**
+Parse the manifest, replace a component's bytes, then rewrite the manifest table
+(recomputing each entry's offset/size) and re-concatenate the data. `kwi replace`
+does this; an unmodified round-trip is byte-identical (trailing padding preserved).
+
+To modify the Linux userland: extract `rootfs`, edit the ext2 nested inside the PCRD
+container (skip the 0x40000 pcrd header; loop-mount or `debugfs`), keep the total
+`rootfs` size unchanged, then `kwi replace <in> rootfs <new-rootfs> <out>`.
+
+## Open question (verify before flashing)
+
+Whether the head unit's *resident* updater (in NOR / internal flash, not in the KWI)
+validates a component (CRC/hash/signature) before writing it is **not yet determined**.
+The `Program Block` records carry per-block values that differ between variants (possible
+checksums). **Test on a donor unit, never the car**, until this is settled.

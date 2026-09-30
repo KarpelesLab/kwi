@@ -15,18 +15,21 @@ see the separate, maps-focused [`jharg/kiwiread`](https://github.com/jharg/kiwir
 
 ## Format
 
-A KWI is three concatenated sections with a small fixed header:
+A KWI wraps a **component manifest** followed by the concatenated component data. The
+manifest is the authoritative layout (offsets relative to the data section, contiguous):
 
-| section | offset | contents |
+| component | magic | what it is |
 |---|---|---|
-| wrapper header | `0x000000` | 4 KiB, tags (`HC59`/`VC59`/`10KA`); does **not** encode the layout |
-| NOR flash image | `0x001000` | partial 16-bit **word-swapped** dump of the 8 MiB x16 boot NOR: `GraphicDB V0564` archives + loader + reprogram BMPs, `0xff`-padded |
-| root (ext2) | `0x158002` | ext2 filesystem, fixed **255 MiB**, the Linux rootfs (not swapped) |
-| tail | `0x10058002` | `SMNG` process/task settings (text) then a raw **uncompressed** Linux 2.6.35 kernel |
+| `grp_dat_13cy_prgup.bmp` / `loading.bmp` | `BM` | reprogram/boot screens (baked bitmaps) |
+| `pmb` | uImage | U-Boot uImage with the kernel command line |
+| `rootfs` | `PCRD` | pcrd container (0x40000 header + a **255 MiB ext2** nested inside), mounted XIP |
+| `USRCONF` | `SMNG` | process/task settings |
+| `xipImage` | — | uncompressed (XIP) Linux 2.6.35 kernel |
 
-The ROOT boundary is the only self-describing one (ext2 superblock); the reader derives it
-from there. No trailing signature. See [FORMAT.md](FORMAT.md) for the full spec and the open
-question of whether the *resident* (in-unit) updater verifies the package before flashing.
+Entry format: `[relOffset:4 BE][size:4 BE][nameLen:2 BE][name][pad→even]`. The kernel
+cmdline (in `pmb`) shows `console=ttyS0,115200 root=/dev/pcrd rootflags=xip … pcrd=0x68000000,xip`.
+See [FORMAT.md](FORMAT.md) for the full spec, the preamble (wrapper header + word-swapped
+`GraphicDB V0564` flash image + Program Block records), and the open verification question.
 
 ## Install
 
@@ -37,14 +40,14 @@ go install github.com/KarpelesLab/kwi/cmd/kwi@latest
 ## Usage
 
 ```
-kwi info    LOADING.KWI                       # show sections
-kwi unpack  LOADING.KWI out/                  # -> out/{front.bin,root.img,kernel.bin}
-kwi pack    front.bin root.img kernel.bin new.KWI
-kwi setroot LOADING.KWI modified-root.img new.KWI   # replace ROOT (must stay 255 MiB ext2)
+kwi info    LOADING.KWI                        # list manifest components
+kwi extract LOADING.KWI out/                   # write each component to out/
+kwi replace LOADING.KWI rootfs new-rootfs out.KWI   # replace a component, repack
 ```
 
-To modify the system: `unpack`, edit `root.img` in place **keeping it exactly 255 MiB**
-(loop-mount, or `debugfs` / `e2tools`), then `setroot` (or `pack`).
+To modify the Linux userland: `extract`, edit the ext2 nested in the `rootfs` PCRD
+container (skip its 0x40000 header; loop-mount or `debugfs`), keep the `rootfs` size
+unchanged, then `kwi replace … rootfs …`. Unmodified round-trips are byte-identical.
 
 ## ⚠️ Warning
 
