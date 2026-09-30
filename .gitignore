@@ -1,0 +1,7 @@
+# never commit vendor firmware/images to the public repo
+*.KWI
+*.kwi
+*.img
+*.bin
+testdata/*.KWI
+/kwi
