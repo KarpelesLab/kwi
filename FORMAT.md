@@ -55,21 +55,31 @@ The DATA section begins immediately after the last entry's name (+pad).
 | `USRCONF` | 0x10058002 | 0xcbb0 | `SMNG_PRO` | process/task settings (tab-separated text) |
 | `xipImage` | 0x10064bb2 | 0x417914 | (ARM) | uncompressed (execute-in-place) Linux 2.6.35 kernel |
 
-### `rootfs` = PCRD (nested ext2)
+### `rootfs` = PCRD (XIP ext2 with a per-page CRC table)
 
-The `rootfs` component is not a raw ext2 — it starts with the ASCII magic `PCRD` and a
-0x40000 (256 KiB) header, then the ext2 filesystem (block size 4096; 255 MiB =
-`0xFF00000`; `0x40000 + 0xFF00000 = 0x0FF40000` = the `rootfs` entry size). It is
-mounted **execute-in-place** by the `pcrd` block driver. From `pmb`'s kernel cmdline:
+The `rootfs` component starts with a `PCRD` header, then the ext2. Format (verified
+against the GPL driver `drivers/block/pcrd.c` — `pcrd_check_header` / `pcrd_validate_page`):
 
 ```
-console=ttyS0,115200 root=/dev/pcrd rootflags=xip lpj=963379 mem=674M quiet pcrd=0x68000000,xip ro max_loop=21
+0x0    "PCRD"                  magic
+0x4    u32 le  num_pages       255 MiB / 4096 = 65280
+0x8    u32                     not validated by the driver (preserved on rebuild)
+0xc    u32 le  csum[num_pages] per 4 KiB page: crc32_le(0xFFFFFFFF, page)
+                               (Linux crc32_le, poly 0xEDB88320, NO final XOR
+                                = zlib.crc32(page) ^ 0xFFFFFFFF)
+       0xff padding to 0x40000 (256 KiB header)
+0x40000 .. end                 the ext2 filesystem (num_pages * 4096)
 ```
 
-- `console=ttyS0,115200` — the debug serial console (SCIF), 115200 baud.
-- `root=/dev/pcrd rootflags=xip`, `pcrd=0x68000000,xip` — rootfs mounted XIP from
-  physical `0x68000000` via the pcrd driver (hence uncompressed & page-aligned).
-- `xipImage` is likewise an XIP kernel.
+Verified: all 65,280 stored CRCs match `crc32_le` of the corresponding 4 KiB page.
+
+The driver mounts this **execute-in-place** as `/dev/pcrd` (`root=/dev/pcrd rootflags=xip`,
+`pcrd=0x68000000,xip`). Reads use unchecked XIP `pcrd_direct_access`; a **background**
+`pcrd_csum_thread` verifies pages and calls `pcrd_detect_damagedarea` / logs
+`page validation failed` on a mismatch. So a stale table does not block boot, but the
+`pcrd` tool recomputes it so the scrub finds nothing wrong.
+
+The `pcrd` package/CLI in this repo decodes and re-encodes this container.
 
 ## Rebuilding a modified image
 
@@ -83,7 +93,8 @@ container (skip the 0x40000 pcrd header; loop-mount or `debugfs`), keep the tota
 
 ## Open question (verify before flashing)
 
-Whether the head unit's *resident* updater (in NOR / internal flash, not in the KWI)
-validates a component (CRC/hash/signature) before writing it is **not yet determined**.
-The `Program Block` records carry per-block values that differ between variants (possible
-checksums). **Test on a donor unit, never the car**, until this is settled.
+The PCRD per-page table is fully understood and recomputable (above), so the rootfs is no
+longer a blocker. What remains unverified is whether the head unit's *resident* reprogram
+updater (in NOR / internal flash, not in the KWI) checks the KWI as a whole (the
+`Program Block` records carry per-variant values that may be checksums) before writing it.
+**Test on a donor unit, never the car**, until this is settled.

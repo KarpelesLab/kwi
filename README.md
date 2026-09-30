@@ -43,11 +43,26 @@ go install github.com/KarpelesLab/kwi/cmd/kwi@latest
 kwi info    LOADING.KWI                        # list manifest components
 kwi extract LOADING.KWI out/                   # write each component to out/
 kwi replace LOADING.KWI rootfs new-rootfs out.KWI   # replace a component, repack
+
+pcrd unpack out/rootfs ext2.img                # rootfs (PCRD) -> raw ext2
+pcrd pack   ext2.img out/rootfs rootfs.new     # ext2 -> rootfs, recomputing page CRCs
+pcrd verify out/rootfs                         # check the per-page CRC table
 ```
 
-To modify the Linux userland: `extract`, edit the ext2 nested in the `rootfs` PCRD
-container (skip its 0x40000 header; loop-mount or `debugfs`), keep the `rootfs` size
-unchanged, then `kwi replace … rootfs …`. Unmodified round-trips are byte-identical.
+Full modify-the-rootfs workflow:
+
+```
+kwi extract LOADING.KWI out/
+pcrd unpack out/rootfs ext2.img
+# edit ext2.img in place (loop-mount ro/rw or debugfs); keep it the same size
+pcrd pack ext2.img out/rootfs rootfs.new
+kwi replace LOADING.KWI rootfs rootfs.new NEW.KWI
+```
+
+The `rootfs` PCRD container (a 256 KiB `crc32_le` per-page table + XIP ext2) is fully
+supported: `pcrd unpack`/`pack` extract and rebuild it, recomputing the page-CRC table so
+the head unit's background scrub (`pcrd_csum_thread`) finds no damage. Unmodified
+round-trips are byte-identical.
 
 ## ⚠️ Warning
 
