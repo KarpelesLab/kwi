@@ -47,6 +47,10 @@ kwi replace LOADING.KWI rootfs new-rootfs out.KWI   # replace a component, repac
 pcrd unpack out/rootfs ext2.img                # rootfs (PCRD) -> raw ext2
 pcrd pack   ext2.img rootfs.new               # ext2 -> rootfs, full header recomputed
 pcrd verify out/rootfs                         # check the per-page CRC table
+
+pmb  info out/pmb                              # boot params: load addrs, sizes, CRCs, cmdline
+pmb  setcmdline out/pmb pmb.new "<cmdline>"    # edit the kernel command line
+pmb  setkernel  out/pmb pmb.new xipImage 0x62e00000   # update kernel size+crc32 (+load addr)
 ```
 
 Full modify-the-rootfs workflow:

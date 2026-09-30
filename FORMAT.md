@@ -81,6 +81,35 @@ The driver mounts this **execute-in-place** as `/dev/pcrd` (`root=/dev/pcrd root
 
 The `pcrd` package/CLI in this repo decodes and re-encodes this container.
 
+
+## `pmb` — boot parameter block
+
+The `pmb` component is what the resident U-Boot reads to launch Linux. It starts with
+the U-Boot uImage magic but is otherwise an Aisin layout (little-endian, 512 bytes):
+
+| off | field | value (HC59) | notes |
+|---|---|---|---|
+| 0x000 | magic | `0x27051956` | uImage magic value (LE) |
+| 0x004 | hcrc | `0x9e2b886c` | header CRC — **algorithm not yet reversed** |
+| 0x008 | kernelLoad | `0x62e00000` | kernel DDR load addr (DDR base 0x60000000) |
+| 0x00c | kernelLoad2 | `0x62f80000` | kernelLoad + 0x180000 |
+| 0x010 | kernelSize | `0x417914` | == xipImage size |
+| 0x014 | kernelCRC | `0x19a823f5` | **crc32(xipImage)** (standard CRC-32) |
+| 0x018 | rootfsBase | `0x68000000` | PCRD XIP base |
+| 0x01c | rootfsSize | `0x0ff40000` | == rootfs component size |
+| 0x020 | cmdline | `console=ttyS0,115200 root=/dev/pcrd rootflags=xip … pcrd=0x68000000,xip` | NUL-terminated |
+| 0x1ec | usrconfLoad | `0x6010c000` | |
+| 0x1f0 | usrconfSize | `0x0000cbb0` | == USRCONF size |
+| 0x1f4 | usrconfCRC | `0x16aeebb9` | USRCONF CRC — **algorithm not yet reversed** |
+| 0x1f8 / 0x1fc | version / variant | `VC59` / `10KA` | |
+
+Solved CRC: `0x014 = crc32(xipImage)` (standard, with final XOR — note this differs from
+pcrd's `crc32_le` without final XOR). The two remaining CRCs (`0x004` header, `0x1f4`
+USRCONF) do not match crc32/crc32_le over any tried range; they are almost certainly
+produced/checked by the U-Boot in the NOR (not present in the Linux kernel we have), so
+reversing them is blocked on a NOR dump. The `pmb` package/CLI preserves those fields on
+edit and recomputes `kernelSize`/`kernelCRC` and the cmdline.
+
 ## Rebuilding a modified image
 
 Parse the manifest, replace a component's bytes, then rewrite the manifest table
