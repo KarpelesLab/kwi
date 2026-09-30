@@ -14,20 +14,22 @@ import (
 	"io"
 )
 
+// Typical values observed on R-Car H1 nav images. These are NOT used to locate
+// the sections (the KWI header does not store the layout); they are only sanity
+// bounds and documentation. The real ROOT offset and size are DERIVED from the
+// ext2 superblock. See FORMAT.md.
 const (
-	// FrontSize is the constant size of the FRONT section (header + loader + UI).
-	FrontSize = 0x158002 // 1,409,026
-	// RootSize is the fixed size of the ROOT ext2 section (255 MiB).
-	RootSize = 0xFF00000 // 267,386,880
-	// RootOffset is where the ext2 ROOT begins (== FrontSize).
-	RootOffset = FrontSize
-	// KernelOffset is where the KERNEL tail begins.
-	KernelOffset = FrontSize + RootSize
+	// TypicalFrontSize is the front-section size seen on every observed image.
+	TypicalFrontSize = 0x158002 // 1,409,026
+	// TypicalRootSize is the ext2 ROOT size seen on every observed image (255 MiB).
+	TypicalRootSize = 0xFF00000 // 267,386,880
 
-	headerLen  = 0x20
-	ext2Magic  = 0xEF53 // little-endian 53 EF, at partition+0x438
-	ext2SBOff  = 0x400  // superblock starts 1024 bytes into the partition
-	minKWISize = KernelOffset + 1
+	headerLen   = 0x20
+	ext2Magic   = 0xEF53 // s_magic, little-endian, at superblock+0x38
+	ext2SBOff   = 0x400  // ext2 superblock starts 1024 bytes into the partition
+	ext2MagicAt = ext2SBOff + 0x38
+	// frontSearchLimit bounds the scan for the ext2 superblock (front is ~1.4 MB).
+	frontSearchLimit = 8 << 20
 )
 
 // Header holds the fixed 0x20-byte KWI header.
@@ -36,33 +38,80 @@ type Header struct {
 	Tag string // module tag at 0x18, e.g. "HC59"
 }
 
-// Image is a parsed KWI split into its three sections.
+// Image is a parsed KWI split into its three sections. RootOffset is where the
+// ext2 ROOT was located (== len(Front)); it and the ROOT size are derived from
+// the ext2 superblock, not from any KWI header field.
 type Image struct {
-	Header Header
-	Front  []byte // includes the header
-	Root   []byte // ext2 filesystem, len == RootSize
-	Kernel []byte // raw Linux image (variable)
+	Header     Header
+	Front      []byte // header + loader + UI bitmaps
+	Root       []byte // ext2 filesystem (size read from its superblock)
+	Kernel     []byte // raw Linux image (the remainder)
+	RootOffset int    // == len(Front)
 }
 
-// Parse reads a whole KWI from data.
-func Parse(data []byte) (*Image, error) {
-	if len(data) < minKWISize {
-		return nil, fmt.Errorf("kwi: too small (%d bytes, need >= %d)", len(data), minKWISize)
-	}
-	var h Header
-	copy(h.Raw[:], data[:headerLen])
-	h.Tag = readTag(data[0x18:0x20])
+// KernelOffset is where the KERNEL tail begins (== len(Front)+len(Root)).
+func (img *Image) KernelOffset() int { return len(img.Front) + len(img.Root) }
 
-	// Sanity-check the ROOT ext2 superblock at the fixed offset.
-	if err := checkExt2(data[RootOffset : RootOffset+ext2SBOff+0x40]); err != nil {
-		return nil, fmt.Errorf("kwi: ROOT does not look like ext2 at 0x%x: %w", RootOffset, err)
+// Parse reads a whole KWI from data. It locates the ROOT filesystem by finding
+// the ext2 superblock (its magic and declared size), then derives the FRONT
+// (everything before it) and the KERNEL (everything after it). The KWI header
+// itself does not encode the layout.
+func Parse(data []byte) (*Image, error) {
+	var h Header
+	if len(data) >= headerLen {
+		copy(h.Raw[:], data[:headerLen])
+		h.Tag = readTag(data[0x18:0x20])
+	}
+
+	rootOff, rootSize, err := findExt2(data)
+	if err != nil {
+		return nil, err
+	}
+	if rootOff+rootSize > len(data) {
+		return nil, fmt.Errorf("kwi: ext2 at 0x%x declares size %d but only %d bytes remain",
+			rootOff, rootSize, len(data)-rootOff)
 	}
 	return &Image{
-		Header: h,
-		Front:  data[:FrontSize],
-		Root:   data[RootOffset:KernelOffset],
-		Kernel: data[KernelOffset:],
+		Header:     h,
+		Front:      data[:rootOff],
+		Root:       data[rootOff : rootOff+rootSize],
+		Kernel:     data[rootOff+rootSize:],
+		RootOffset: rootOff,
 	}, nil
+}
+
+// findExt2 scans the front of the image for a valid ext2 superblock and returns
+// the partition start offset and the filesystem size (blocks_count * block_size)
+// read from that superblock.
+func findExt2(data []byte) (off, size int, err error) {
+	limit := frontSearchLimit
+	if limit > len(data) {
+		limit = len(data)
+	}
+	for i := 0; i+ext2MagicAt+2 <= limit; i += 2 {
+		if data[i] != 0x53 || data[i+1] != 0xEF { // s_magic bytes, LE
+			continue
+		}
+		part := i - ext2MagicAt
+		if part < 0 || part+ext2SBOff+0x40 > len(data) {
+			continue
+		}
+		sb := data[part+ext2SBOff:]
+		if binary.LittleEndian.Uint16(sb[0x38:]) != ext2Magic {
+			continue
+		}
+		blocks := uint64(binary.LittleEndian.Uint32(sb[0x04:]))
+		logbs := binary.LittleEndian.Uint32(sb[0x18:])
+		if logbs > 6 || blocks == 0 || blocks > 1<<31 {
+			continue
+		}
+		fsSize := blocks * (1024 << logbs)
+		if fsSize == 0 || part+int(fsSize) > len(data) {
+			continue
+		}
+		return part, int(fsSize), nil
+	}
+	return 0, 0, errNoExt2
 }
 
 // ParseReader reads the whole stream and parses it.
@@ -74,14 +123,14 @@ func ParseReader(r io.Reader) (*Image, error) {
 	return Parse(data)
 }
 
-// Pack reassembles the container: Front || Root || Kernel.
-// Root must be exactly RootSize; Front must be exactly FrontSize.
+// Pack reassembles the container: Front || Root || Kernel. Root must be a valid
+// ext2 filesystem (the boundary is self-describing via its superblock).
 func (img *Image) Pack() ([]byte, error) {
-	if len(img.Front) != FrontSize {
-		return nil, fmt.Errorf("kwi: Front must be %d bytes, got %d", FrontSize, len(img.Front))
+	if len(img.Root) < ext2SBOff+0x40 {
+		return nil, fmt.Errorf("kwi: Root too small to be ext2 (%d bytes)", len(img.Root))
 	}
-	if len(img.Root) != RootSize {
-		return nil, fmt.Errorf("kwi: Root must be exactly %d bytes (255 MiB), got %d", RootSize, len(img.Root))
+	if err := checkExt2(img.Root[:ext2SBOff+0x40]); err != nil {
+		return nil, fmt.Errorf("kwi: Root is not valid ext2: %w", err)
 	}
 	out := make([]byte, 0, len(img.Front)+len(img.Root)+len(img.Kernel))
 	out = append(out, img.Front...)
@@ -100,10 +149,12 @@ func (img *Image) WriteTo(w io.Writer) (int64, error) {
 	return int64(n), err
 }
 
-// SetRoot replaces the ROOT ext2 image, enforcing the fixed size.
+// SetRoot replaces the ROOT ext2 image. The replacement must be a valid ext2
+// filesystem and, to preserve the on-flash layout the updater expects, the same
+// size as the original ROOT. Modify the ext2 in place (do not grow/shrink it).
 func (img *Image) SetRoot(root []byte) error {
-	if len(root) != RootSize {
-		return fmt.Errorf("kwi: root must be exactly %d bytes (255 MiB), got %d", RootSize, len(root))
+	if len(root) != len(img.Root) {
+		return fmt.Errorf("kwi: replacement root must be exactly %d bytes (same as original), got %d", len(img.Root), len(root))
 	}
 	if err := checkExt2(root[:ext2SBOff+0x40]); err != nil {
 		return fmt.Errorf("kwi: replacement root is not valid ext2: %w", err)

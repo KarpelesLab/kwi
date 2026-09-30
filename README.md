@@ -17,14 +17,16 @@ see the separate, maps-focused [`jharg/kiwiread`](https://github.com/jharg/kiwir
 
 A KWI is three concatenated sections with a small fixed header:
 
-| section | offset | size | contents |
-|---|---|---|---|
-| front  | `0x000000` | `0x158002` (fixed) | header + updater/loader + baked UI bitmaps |
-| root   | `0x158002` | `0xFF00000` (255 MiB, fixed) | ext2 filesystem (the Linux rootfs) |
-| kernel | `0x10058002` | tail (variable) | raw uncompressed Linux 2.6.35 image |
+| section | offset | contents |
+|---|---|---|
+| wrapper header | `0x000000` | 4 KiB, tags (`HC59`/`VC59`/`10KA`); does **not** encode the layout |
+| NOR flash image | `0x001000` | partial 16-bit **word-swapped** dump of the 8 MiB x16 boot NOR: `GraphicDB V0564` archives + loader + reprogram BMPs, `0xff`-padded |
+| root (ext2) | `0x158002` | ext2 filesystem, fixed **255 MiB**, the Linux rootfs (not swapped) |
+| tail | `0x10058002` | `SMNG` process/task settings (text) then a raw **uncompressed** Linux 2.6.35 kernel |
 
-No trailing signature. See [FORMAT.md](FORMAT.md) for the full spec, header fields,
-and the open question of whether the *resident* (in-unit) updater verifies the package.
+The ROOT boundary is the only self-describing one (ext2 superblock); the reader derives it
+from there. No trailing signature. See [FORMAT.md](FORMAT.md) for the full spec and the open
+question of whether the *resident* (in-unit) updater verifies the package before flashing.
 
 ## Install
 

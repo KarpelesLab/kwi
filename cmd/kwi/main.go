@@ -69,9 +69,9 @@ func info(a []string) {
 	img, err := kwi.Parse(read(a[0]))
 	die(err)
 	fmt.Printf("tag        %s\n", img.Header.Tag)
-	fmt.Printf("front      0x%08x  %d bytes\n", 0, len(img.Front))
-	fmt.Printf("root(ext2) 0x%08x  %d bytes  (superblock says %d)\n", kwi.RootOffset, len(img.Root), img.Ext2Size())
-	fmt.Printf("kernel     0x%08x  %d bytes\n", kwi.KernelOffset, len(img.Kernel))
+	fmt.Printf("front      0x%08x  %d bytes  (wrapper header + word-swapped NOR image: GraphicDB + loader)\n", 0, len(img.Front))
+	fmt.Printf("root(ext2) 0x%08x  %d bytes  (superblock says %d)\n", img.RootOffset, len(img.Root), img.Ext2Size())
+	fmt.Printf("tail       0x%08x  %d bytes  (SMNG process/task settings, then uncompressed Linux kernel)\n", img.KernelOffset(), len(img.Kernel))
 	fmt.Printf("total                  %d bytes\n", len(img.Front)+len(img.Root)+len(img.Kernel))
 }
 
